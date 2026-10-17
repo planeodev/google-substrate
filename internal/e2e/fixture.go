@@ -117,12 +117,18 @@ type SubstrateFixtureManifests struct {
 // namespace holding the pool) and the created templates.
 func DeploySubstrateFixture(t *testing.T, ctx context.Context, clients *Clients, manifests SubstrateFixtureManifests, bucket, name string, trustBundles []string) (string, []*ateapipb.ActorTemplate) {
 	t.Helper()
-	return deploySubstrateFixture(t, ctx, clients, manifests, bucket, name, trustBundles, nil)
+	return deploySubstrateFixture(t, ctx, clients, manifests, bucket, name, trustBundles, fixtureOptions{})
 }
 
-// deploySubstrateFixture is DeploySubstrateFixture with an optional mutate hook applied to every rendered
-// template before it is created (nil: none).
-func deploySubstrateFixture(t *testing.T, ctx context.Context, clients *Clients, manifests SubstrateFixtureManifests, bucket, name string, trustBundles []string, mutate func(*ateapipb.ActorTemplate)) (string, []*ateapipb.ActorTemplate) {
+// fixtureOptions adjusts deploySubstrateFixture: mutate is applied to every rendered template before it is
+// created (nil: none); skipGoldenWait returns right after the templates are created instead of waiting for
+// their golden snapshots (for tests that expect the golden build to fail).
+type fixtureOptions struct {
+	mutate         func(*ateapipb.ActorTemplate)
+	skipGoldenWait bool
+}
+
+func deploySubstrateFixture(t *testing.T, ctx context.Context, clients *Clients, manifests SubstrateFixtureManifests, bucket, name string, trustBundles []string, opts fixtureOptions) (string, []*ateapipb.ActorTemplate) {
 	t.Helper()
 
 	// The pool manifest also carries the namespace. Its cleanup is registered
@@ -142,9 +148,9 @@ func deploySubstrateFixture(t *testing.T, ctx context.Context, clients *Clients,
 	tmplInline, tmplBlocks := substrateTemplateSubstitutions(bucket, name, trustBundles)
 	rendered := koResolve(t, renderManifest(t, manifests.Template, tmplInline, tmplBlocks))
 	templates := decodeSubstrateTemplates(t, rendered)
-	if mutate != nil {
+	if opts.mutate != nil {
 		for _, tmpl := range templates {
-			mutate(tmpl)
+			opts.mutate(tmpl)
 		}
 	}
 
@@ -192,6 +198,9 @@ func deploySubstrateFixture(t *testing.T, ctx context.Context, clients *Clients,
 
 	for _, tmpl := range created {
 		t.Logf("Waiting for ActorTemplate %s/%s golden snapshot...", atespace, tmpl.GetMetadata().GetName())
+		if opts.skipGoldenWait {
+			continue
+		}
 		WaitForSubstrateTemplateReady(ctx, t, clients, atespace, tmpl.GetMetadata().GetName())
 	}
 	return atespace, created

@@ -37,8 +37,9 @@ var probeManifests = SubstrateFixtureManifests{
 type ProbeOption func(*probeConfig)
 
 type probeConfig struct {
-	trustBundles []string
-	image        string
+	trustBundles   []string
+	image          string
+	skipGoldenWait bool
 }
 
 // The allowlisted names atelet resolves trust bundles by.
@@ -61,6 +62,12 @@ func WithTrustBundle() ProbeOption {
 // of the probe in a private registry, to prove a pull path. The template's containers all take it.
 func WithImage(image string) ProbeOption {
 	return func(c *probeConfig) { c.image = image }
+}
+
+// WithoutGoldenWait returns as soon as the template is created instead of waiting for its golden snapshot,
+// for tests that expect the golden build to fail (they poll the template's GoldenSnapshotStatus themselves).
+func WithoutGoldenWait() ProbeOption {
+	return func(c *probeConfig) { c.skipGoldenWait = true }
 }
 
 // WithSystemRoots adds the WebPKI roots atelet ships to the probe's projected
@@ -98,6 +105,6 @@ func DeployProbe(t *testing.T, bucket, name string, opts ...ProbeOption) (string
 			}
 		}
 	}
-	atespace, templates := deploySubstrateFixture(t, context.Background(), GetClients(), probeManifests, bucket, name, cfg.trustBundles, mutate)
+	atespace, templates := deploySubstrateFixture(t, context.Background(), GetClients(), probeManifests, bucket, name, cfg.trustBundles, fixtureOptions{mutate: mutate, skipGoldenWait: cfg.skipGoldenWait})
 	return atespace, templates[0]
 }

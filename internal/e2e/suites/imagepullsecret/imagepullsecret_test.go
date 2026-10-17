@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"go.ate.dev/substrate/internal/e2e"
+	"go.ate.dev/substrate/pkg/proto/ateapipb"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -51,6 +53,12 @@ const (
 //     cache can serve it (a cache hit skips the network, and with it authentication);
 //   - pulled with the Secret: a probe template whose image is the private copy reaches its golden snapshot,
 //     which atelet can only build after pulling the image with the credentials the plugin returned.
+//
+// E2E_PRIVATE_PULL_EXPECT selects the phase (the same private copy, the same probe, two installs):
+//
+//	denied   atelet WITHOUT the component (the stock install): the golden build must fail, refused by the
+//	         registry — proving the image is unreachable without the Secret. Run this first.
+//	allowed  (default) atelet WITH the component and the Secret: the golden snapshot must be built.
 //
 // It needs a registry the cluster reaches over TLS (atelet allows plain HTTP only for localhost registries)
 // and credentials that can push and pull there; it skips when they are not configured:
@@ -80,11 +88,20 @@ func TestActorImageFromPrivateRegistry(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	if _, err := e2e.GetClients().K8s.CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{}); err != nil {
-		if apierrors.IsNotFound(err) {
-			t.Fatalf("Secret %s/%s is missing: create it before installing the image-credential-secret component (see the test doc)", secretNamespace, secretName)
+	expect := os.Getenv("E2E_PRIVATE_PULL_EXPECT")
+	if expect == "" {
+		expect = "allowed"
+	}
+	if expect != "allowed" && expect != "denied" {
+		t.Fatalf("E2E_PRIVATE_PULL_EXPECT=%q: want allowed or denied", expect)
+	}
+	if expect == "allowed" {
+		if _, err := e2e.GetClients().K8s.CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{}); err != nil {
+			if apierrors.IsNotFound(err) {
+				t.Fatalf("Secret %s/%s is missing: create it before installing the image-credential-secret component (see the test doc)", secretNamespace, secretName)
+			}
+			t.Fatalf("get Secret %s/%s: %v", secretNamespace, secretName, err)
 		}
-		t.Fatalf("get Secret %s/%s: %v", secretNamespace, secretName, err)
 	}
 
 	source := buildProbe(t)
@@ -100,6 +117,11 @@ func TestActorImageFromPrivateRegistry(t *testing.T) {
 		t.Fatalf("%s is readable anonymously: E2E_PRIVATE_REPOSITORY must name a private repository", private)
 	} else {
 		t.Logf("anonymous HEAD refused, as expected: %v", err)
+	}
+
+	if expect == "denied" {
+		expectPullDenied(t, ctx, env["BUCKET_NAME"], private)
+		return
 	}
 
 	// DeployProbe waits for the template's golden snapshot: atelet pulled the image (with the plugin's
@@ -181,4 +203,39 @@ func pushPrivateCopy(t *testing.T, ctx context.Context, source, repo string, aut
 		}
 	}
 	return repo + "@" + digest.String()
+}
+
+// pullDenied matches how a registry refuses an unauthenticated pull, as atelet reports it in the template's
+// GoldenSnapshotStatus (go-containerregistry transport errors carry the HTTP status and registry error code).
+var pullDenied = regexp.MustCompile(`(?i)unauthori[sz]ed|denied|forbidden|authentication required|\b40[13]\b`)
+
+// expectPullDenied deploys the probe from the private image and requires its golden build to FAIL with a
+// registry refusal: without credentials the image cannot be pulled. A golden snapshot appearing is a failure.
+func expectPullDenied(t *testing.T, ctx context.Context, bucket, private string) {
+	t.Helper()
+	atespace, tmpl := e2e.DeployProbe(t, bucket, "imagepullsecret-denied", e2e.WithImage(private), e2e.WithoutGoldenWait())
+	ref := &ateapipb.ObjectRef{Atespace: atespace, Name: tmpl.GetMetadata().GetName()}
+	ctx, cancel := context.WithTimeout(ctx, e2e.TemplateReadyTimeout(t))
+	defer cancel()
+	for {
+		at, err := e2e.GetClients().SubstrateAPI.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{ActorTemplate: ref})
+		if err == nil {
+			st := at.GetStatus().GetGoldenSnapshotStatus()
+			if st.GetGoldenTag().GetName() != "" {
+				t.Fatalf("golden snapshot built from %s without credentials: the image is not private to this cluster", private)
+			}
+			if msg := st.GetErrorMessage(); msg != "" {
+				if !pullDenied.MatchString(msg) {
+					t.Fatalf("golden build failed, but not with a registry refusal: %s", msg)
+				}
+				t.Logf("golden build refused without credentials, as expected: %s", msg)
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for the golden build of %s/%s to fail (last err %v)", atespace, ref.GetName(), err)
+		case <-time.After(time.Second):
+		}
+	}
 }
