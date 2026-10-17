@@ -44,6 +44,8 @@ jobs:
     timeout-minutes: 90
     env:
       E2E_ATENET_DATAPLANE: envoy
+      # Same as upstream's e2e job: the installer requires an egress credential provider (the bundled k8s.io one).
+      ATE_CREDENTIAL_PROVIDER: '{"name":"k8s.io"}'
       ARTIFACTS: ${{ github.workspace }}/_artifacts
       E2E_PRIVATE_REPOSITORY: ghcr.io/${{ github.repository }}/e2e-private-probe
     steps:
