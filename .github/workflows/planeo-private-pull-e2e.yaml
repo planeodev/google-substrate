@@ -91,8 +91,6 @@ jobs:
         KO_CONFIG_PATH="${PWD}" hack/run-tool.sh ko resolve -f "${RUNNER_TEMP}/atelet.yaml" | kubectl apply -f -
         kubectl -n ate-system rollout status daemonset/atelet --timeout=10m
         kubectl -n ate-system get pods -l app=atelet -o wide
-    - name: Focus the node on gVisor
-      run: hack/e2e-focus-sandbox-class.sh gvisor
     - name: Run the private-pull e2e
       env:
         E2E_PRIVATE_REGISTRY_USERNAME: ${{ github.actor }}
