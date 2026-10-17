@@ -66,7 +66,7 @@ const (
 //	  --docker-server=<registry> --docker-username=<user> --docker-password=<token>
 //	ko resolve -f <(kubectl kustomize --load-restrictor LoadRestrictionsNone \
 //	  manifests/ate-install/kind-image-credential-secret) | kubectl apply -f -
-//	hack/run-e2e-kind.sh ./internal/e2e/suites/imagepullsecret -v -args --no-color
+//	hack/run-e2e-kind.sh ./internal/e2e/suites/imagepullsecret -v -args --no-color --preview=""
 func TestActorImageFromPrivateRegistry(t *testing.T) {
 	repo := os.Getenv("E2E_PRIVATE_REPOSITORY")
 	user := os.Getenv("E2E_PRIVATE_REGISTRY_USERNAME")
