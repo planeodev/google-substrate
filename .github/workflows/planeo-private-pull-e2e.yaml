@@ -27,7 +27,7 @@ name: planeo-private-pull-e2e
 
 on:
   push:
-    branches: ['planeo/**']
+    branches: ['planeo/**', 'feature/**']
   workflow_dispatch:
 
 permissions:
@@ -73,6 +73,13 @@ jobs:
       run: hack/create-kind-cluster.sh
     - name: Install Agent Substrate
       run: hack/install-ate-kind.sh --deploy-ate-system
+    - name: "Phase 1 — denied: stock atelet (no credentials) must NOT pull the private image"
+      env:
+        E2E_PRIVATE_PULL_EXPECT: denied
+        E2E_PRIVATE_REGISTRY_USERNAME: ${{ github.actor }}
+        E2E_PRIVATE_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        E2E_JUNIT_FILE: ${{ github.workspace }}/_artifacts/e2e-imagepullsecret-denied.xml
+      run: hack/run-e2e-kind.sh ./internal/e2e/suites/imagepullsecret -v -args --no-color --preview=""
     - name: Registry Secret for atelet (before atelet restarts, so the volume is populated at start)
       env:
         REGISTRY_USER: ${{ github.actor }}
@@ -91,12 +98,31 @@ jobs:
         KO_CONFIG_PATH="${PWD}" hack/run-tool.sh ko resolve -f "${RUNNER_TEMP}/atelet.yaml" | kubectl apply -f -
         kubectl -n ate-system rollout status daemonset/atelet --timeout=10m
         kubectl -n ate-system get pods -l app=atelet -o wide
-    - name: Run the private-pull e2e
+    - name: "Phase 2 — allowed: atelet with the component + Secret must pull the private image"
       env:
+        E2E_PRIVATE_PULL_EXPECT: allowed
         E2E_PRIVATE_REGISTRY_USERNAME: ${{ github.actor }}
         E2E_PRIVATE_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        E2E_JUNIT_FILE: ${{ github.workspace }}/_artifacts/e2e-imagepullsecret.xml
+        E2E_JUNIT_FILE: ${{ github.workspace }}/_artifacts/e2e-imagepullsecret-allowed.xml
       run: hack/run-e2e-kind.sh ./internal/e2e/suites/imagepullsecret -v -args --no-color --preview=""
+    - name: Evidence — atelet's pulls of the private image (credential provider → registry → layers)
+      if: always()
+      run: |
+        mkdir -p "${ARTIFACTS}"
+        for p in $(kubectl -n ate-system get pods -l app=atelet -o name); do
+          kubectl -n ate-system logs "$p" -c atelet --timestamps > "${ARTIFACTS}/$(basename "$p").log" 2>&1 || true
+          kubectl -n ate-system logs "$p" -c atelet --timestamps --previous > "${ARTIFACTS}/$(basename "$p")-previous.log" 2>/dev/null || true
+        done
+        echo "::group::atelet lines about the private repository (${E2E_PRIVATE_REPOSITORY})"
+        cat "${ARTIFACTS}"/atelet-*.log | grep -E "e2e-private-probe|credential|provider|unauthori|denied" | head -200
+        echo "::endgroup::"
+    - name: Upload evidence
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: planeo-private-pull-evidence
+        path: _artifacts/
+        retention-days: 30
     - name: Diagnostics
       if: always()
       run: |
