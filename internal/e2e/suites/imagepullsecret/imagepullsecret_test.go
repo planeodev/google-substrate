@@ -35,6 +35,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"go.ate.dev/substrate/internal/e2e"
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -205,8 +206,8 @@ func pushPrivateCopy(t *testing.T, ctx context.Context, source, repo string, aut
 	return repo + "@" + digest.String()
 }
 
-// pullDenied matches how a registry refuses an unauthenticated pull, as atelet reports it in the template's
-// GoldenSnapshotStatus (go-containerregistry transport errors carry the HTTP status and registry error code).
+// pullDenied matches how a registry refuses an unauthenticated pull in atelet's log (go-containerregistry
+// transport errors carry the registry's error code, e.g. GHCR's "UNAUTHORIZED: authentication required").
 var pullDenied = regexp.MustCompile(`(?i)unauthori[sz]ed|denied|forbidden|authentication required|\b40[13]\b`)
 
 // expectPullDenied deploys the probe from the private image and requires its golden build to FAIL with a
@@ -225,10 +226,14 @@ func expectPullDenied(t *testing.T, ctx context.Context, bucket, private string)
 				t.Fatalf("golden snapshot built from %s without credentials: the image is not private to this cluster", private)
 			}
 			if msg := st.GetErrorMessage(); msg != "" {
-				if !pullDenied.MatchString(msg) {
-					t.Fatalf("golden build failed, but not with a registry refusal: %s", msg)
+				// The template status abstracts the cause (e.g. "GoldenActorCrashed"); the registry's refusal is in
+				// atelet's log, on the EnsureImage of this exact digest.
+				t.Logf("golden build failed without credentials: %s", msg)
+				line := ateletLogLine(t, ctx, private)
+				if line == "" {
+					t.Fatalf("golden build failed, but atelet logged no registry refusal for %s", private)
 				}
-				t.Logf("golden build refused without credentials, as expected: %s", msg)
+				t.Logf("atelet: %s", line)
 				return
 			}
 		}
@@ -238,4 +243,28 @@ func expectPullDenied(t *testing.T, ctx context.Context, bucket, private string)
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// ateletLogLine returns the first atelet log line that names image and carries a registry refusal ("" if
+// none) — the pull error atelet hit, as it reported it.
+func ateletLogLine(t *testing.T, ctx context.Context, image string) string {
+	t.Helper()
+	k8s := e2e.GetClients().K8s
+	pods, err := k8s.CoreV1().Pods(secretNamespace).List(ctx, metav1.ListOptions{LabelSelector: "app=atelet"})
+	if err != nil {
+		t.Fatalf("list atelet pods: %v", err)
+	}
+	for _, p := range pods.Items {
+		raw, err := k8s.CoreV1().Pods(secretNamespace).GetLogs(p.Name, &corev1.PodLogOptions{Container: "atelet"}).DoRaw(ctx)
+		if err != nil {
+			t.Logf("logs of %s: %v", p.Name, err)
+			continue
+		}
+		for _, l := range strings.Split(string(raw), "\n") {
+			if strings.Contains(l, image) && pullDenied.MatchString(l) {
+				return l
+			}
+		}
+	}
+	return ""
 }
