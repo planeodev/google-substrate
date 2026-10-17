@@ -96,7 +96,7 @@ jobs:
         E2E_PRIVATE_REGISTRY_USERNAME: ${{ github.actor }}
         E2E_PRIVATE_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         E2E_JUNIT_FILE: ${{ github.workspace }}/_artifacts/e2e-imagepullsecret.xml
-      run: hack/run-e2e-kind.sh ./internal/e2e/suites/imagepullsecret -v -args --no-color
+      run: hack/run-e2e-kind.sh ./internal/e2e/suites/imagepullsecret -v -args --no-color --preview=""
     - name: Diagnostics
       if: always()
       run: |
