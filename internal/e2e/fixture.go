@@ -117,6 +117,13 @@ type SubstrateFixtureManifests struct {
 // namespace holding the pool) and the created templates.
 func DeploySubstrateFixture(t *testing.T, ctx context.Context, clients *Clients, manifests SubstrateFixtureManifests, bucket, name string, trustBundles []string) (string, []*ateapipb.ActorTemplate) {
 	t.Helper()
+	return deploySubstrateFixture(t, ctx, clients, manifests, bucket, name, trustBundles, nil)
+}
+
+// deploySubstrateFixture is DeploySubstrateFixture with an optional mutate hook applied to every rendered
+// template before it is created (nil: none).
+func deploySubstrateFixture(t *testing.T, ctx context.Context, clients *Clients, manifests SubstrateFixtureManifests, bucket, name string, trustBundles []string, mutate func(*ateapipb.ActorTemplate)) (string, []*ateapipb.ActorTemplate) {
+	t.Helper()
 
 	// The pool manifest also carries the namespace. Its cleanup is registered
 	// first so it runs last (t.Cleanup is LIFO), after the templates that
@@ -135,6 +142,11 @@ func DeploySubstrateFixture(t *testing.T, ctx context.Context, clients *Clients,
 	tmplInline, tmplBlocks := substrateTemplateSubstitutions(bucket, name, trustBundles)
 	rendered := koResolve(t, renderManifest(t, manifests.Template, tmplInline, tmplBlocks))
 	templates := decodeSubstrateTemplates(t, rendered)
+	if mutate != nil {
+		for _, tmpl := range templates {
+			mutate(tmpl)
+		}
+	}
 
 	atespace := templates[0].GetMetadata().GetAtespace()
 	for _, tmpl := range templates {

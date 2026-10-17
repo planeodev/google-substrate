@@ -1,0 +1,100 @@
+# FORK-ONLY (planeodev/google-substrate) — NOT part of the upstream contribution.
+#
+# Proves Secret-based private image pulls for actors end to end on a real registry: kind + Agent Substrate (gVisor)
+# installed exactly as upstream's e2e does, then atelet re-applied with
+# manifests/ate-install/components/image-credential-secret (via manifests/ate-install/kind-image-credential-secret),
+# then internal/e2e/suites/imagepullsecret pulls the probe from a PRIVATE GHCR package of this fork.
+#
+# Credentials: only this job's GITHUB_TOKEN (packages: write to push the private copy, read for the pull) — it is
+# ephemeral, masked in logs, and lives only in the throwaway kind cluster's Secret. No stored secret.
+# The package ghcr.io/planeodev/google-substrate/e2e-private-probe MUST be private: the suite fails if an
+# anonymous read succeeds (set it private once in the org's package settings if GitHub created it public).
+name: planeo-private-pull-e2e
+
+on:
+  push:
+    branches: ['planeo/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: planeo-private-pull-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-private-pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      E2E_ATENET_DATAPLANE: envoy
+      ARTIFACTS: ${{ github.workspace }}/_artifacts
+      E2E_PRIVATE_REPOSITORY: ghcr.io/${{ github.repository }}/e2e-private-probe
+    steps:
+    - name: Checkout
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      with:
+        go-version-file: 'go.mod'
+        cache: false
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      with:
+        driver-opts: network=host
+        buildkitd-config-inline: |
+          [registry."localhost:5001"]
+            http = true
+    - name: Enable KVM
+      run: |
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+          | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+    - name: Create cluster
+      run: hack/create-kind-cluster.sh
+    - name: Install Agent Substrate
+      run: hack/install-ate-kind.sh --deploy-ate-system
+    - name: Registry Secret for atelet (before atelet restarts, so the volume is populated at start)
+      env:
+        REGISTRY_USER: ${{ github.actor }}
+        REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        kubectl -n ate-system create secret docker-registry atelet-registry-auth \
+          --docker-server=ghcr.io --docker-username="${REGISTRY_USER}" --docker-password="${REGISTRY_TOKEN}" \
+          --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        echo "Secret ate-system/atelet-registry-auth created (value not printed)"
+    - name: Re-apply atelet with the image-credential-secret component
+      env:
+        KO_DOCKER_REPO: localhost:5001
+      run: |
+        kubectl kustomize --load-restrictor LoadRestrictionsNone manifests/ate-install/kind-image-credential-secret \
+          > "${RUNNER_TEMP}/atelet.yaml"
+        KO_CONFIG_PATH="${PWD}" hack/run-tool.sh ko resolve -f "${RUNNER_TEMP}/atelet.yaml" | kubectl apply -f -
+        kubectl -n ate-system rollout status daemonset/atelet --timeout=10m
+        kubectl -n ate-system get pods -l app=atelet -o wide
+    - name: Focus the node on gVisor
+      run: hack/e2e-focus-sandbox-class.sh gvisor
+    - name: Run the private-pull e2e
+      env:
+        E2E_PRIVATE_REGISTRY_USERNAME: ${{ github.actor }}
+        E2E_PRIVATE_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        E2E_JUNIT_FILE: ${{ github.workspace }}/_artifacts/e2e-imagepullsecret.xml
+      run: hack/run-e2e-kind.sh ./internal/e2e/suites/imagepullsecret -v -args --no-color
+    - name: Diagnostics
+      if: always()
+      run: |
+        {
+          echo "### planeo-private-pull-e2e"
+          echo
+          echo '```'
+          kubectl -n ate-system get pods -o wide 2>&1 | head -40
+          echo '```'
+          echo '#### atelet log (credential provider + pulls)'
+          echo '```'
+          kubectl -n ate-system logs daemonset/atelet -c atelet --tail=400 2>&1 \
+            | grep -iE 'credential|provider|pull|auth|ghcr|e2e-private' | tail -60
+          echo '```'
+        } >> "${GITHUB_STEP_SUMMARY}"
